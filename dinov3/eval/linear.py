@@ -8,15 +8,17 @@ import logging
 import os
 import sys
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
+import torch.nn.functional as F
 from omegaconf import MISSING
 from torch.nn.parallel import DistributedDataParallel
 
@@ -78,7 +80,7 @@ class SchedulerType(Enum):
         return scheduler
 
 
-_DEFAULT_LR_LIST: Tuple[float, ...] = (1e-5, 2e-5, 5e-5, 1e-4, 2e-4, 5e-4, 1e-3, 2e-3, 5e-3, 1e-2, 2e-2, 5e-2, 0.1)
+_DEFAULT_LR_LIST: Tuple[float, ...] = (1e-5, 2e-5, 5e-5, 1e-4, 2e-4, 5e-4, 1e-3, 2e-3, 5e-3, 1e-2, 2e-2, 5e-2, 0.1, 0.2, 0.5, 1.0)
 
 
 @dataclass
@@ -103,6 +105,8 @@ class TrainConfig:
     checkpoint_retention_policy: CheckpointRetentionPolicy = CheckpointRetentionPolicy.NONE  # keep checkpoints or not
     resume: bool = True  # whether to resume from existing checkpoints
     classifier_fpath: Optional[str] = None  # path to a file containing pretrained linear classifiers
+    balanced_sampler: bool = False  # whether to use a balanced sampler for training
+    balanced_sampler_mode: Optional[Union[str, int]] = None  # mode for balanced sampling
 
 
 @dataclass
@@ -143,6 +147,29 @@ def has_ddp_wrapper(m: nn.Module) -> bool:
 
 def remove_ddp_wrapper(m: nn.Module) -> nn.Module:
     return m.module if has_ddp_wrapper(m) else m
+
+
+def get_cls_num_list(labels):
+    counter = defaultdict(int)
+    for label in labels:
+        counter[label] += 1
+    labels = list(counter.keys())
+    labels.sort()
+    cls_num_list = [counter[label] for label in labels]
+    return cls_num_list
+
+
+class LogitAdjustedLoss(nn.Module):
+    def __init__(self, cls_num_list, tau=1.0):
+        super().__init__()
+        cls_num_ratio = cls_num_list / torch.sum(cls_num_list)
+        log_cls_num = torch.log(cls_num_ratio)
+        self.log_cls_num = log_cls_num
+        self.tau = tau
+
+    def forward(self, logit, target):
+        logit_adjusted = logit + self.tau * self.log_cls_num.unsqueeze(0)
+        return F.cross_entropy(logit_adjusted, target)
 
 
 def create_linear_input(x_tokens_list, use_n_blocks, use_avgpool):
@@ -482,7 +509,13 @@ def train_linear_classifiers(
     checkpoint_period = train_config.save_checkpoint_iterations or train_config.epoch_length
     eval_period = train_config.eval_period_iterations or train_config.epoch_length
 
-    sampler_type = SamplerType.INFINITE
+
+    if train_config.balanced_sampler:
+        sampler_type = SamplerType.SHARDED_INFINITE_BALANCED
+        balanced_sampler_mode = train_config.balanced_sampler_mode
+    else:
+        sampler_type = SamplerType.INFINITE
+        balanced_sampler_mode = None
     train_data_loader = make_data_loader(
         dataset=train_dataset,
         batch_size=train_config.batch_size,
@@ -493,7 +526,13 @@ def train_linear_classifiers(
         sampler_advance=start_iter,
         drop_last=True,
         persistent_workers=True,
+        balanced_sampler_mode=balanced_sampler_mode,
     )
+
+    if train_config.loss_type == LossType.LOGIT_ADJUSTED_LOSS:
+        cls_num_list = get_cls_num_list(train_data_loader.dataset.get_targets())
+        cls_num_list = torch.Tensor(cls_num_list).to("cuda")
+        criterion = LogitAdjustedLoss(cls_num_list)
 
     iteration = start_iter
     logger.info("Starting training from iteration {}".format(start_iter))
