@@ -25,6 +25,7 @@ logger = logging.getLogger("fairvit")
 class LossType(Enum):
     CROSS_ENTROPY = "cross_entropy"
     BINARY_CROSS_ENTROPY = "binary_cross_entropy"
+    LOGIT_ADJUSTED_LOSS = "logit_adjusted_loss"
 
 
 class ModelWithNormalize(torch.nn.Module):
