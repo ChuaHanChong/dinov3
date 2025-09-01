@@ -92,7 +92,7 @@ class TrainConfig:
     num_workers: int = 8
     # Linear Head Parameters
     learning_rates: Tuple[float, ...] = _DEFAULT_LR_LIST  # learning rates to grid search
-    n_last_blocks_list: Tuple[int] = (1,)  # number of backbone last blocks used for the linear classifier
+    n_last_blocks_list: Tuple[int] = (1, 4)  # number of backbone last blocks used for the linear classifier
     loss_type: LossType = LossType.CROSS_ENTROPY
     optimizer_type: OptimizerType = OptimizerType.SGD
     scheduler_type: SchedulerType = SchedulerType.COSINE_ANNEALING
@@ -240,7 +240,7 @@ def setup_linear_classifiers(sample_output, n_last_blocks_list, learning_rates, 
     linear_classifiers_dict = nn.ModuleDict()
     optim_param_groups = []
     for n in n_last_blocks_list:
-        for avgpool in [True]:
+        for avgpool in [False, True]:
             for _lr in learning_rates:
                 lr = scale_lr(_lr, batch_size)
                 out_dim = create_linear_input(sample_output, use_n_blocks=n, use_avgpool=avgpool).shape[1]
